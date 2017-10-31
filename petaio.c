@@ -15,6 +15,7 @@
 #include "timestep.h"
 
 #include "petaio.h"
+#include "slotsmanager.h"
 #include "mymalloc.h"
 #include "openmpsort.h"
 #include "utils-string.h"
@@ -222,14 +223,54 @@ void petaio_read_internal(char * fname, int ic) {
     /*Allocate the particle memory*/
     petaio_alloc_particle_memory();
 
-    /* set up the memory topology */
-    int offset = 0;
     int NLocal[6];
     for(ptype = 0; ptype < 6; ptype ++) {
         int64_t start = ThisTask * NTotal[ptype] / NTask;
         int64_t end = (ThisTask + 1) * NTotal[ptype] / NTask;
         NLocal[ptype] = end - start;
         NumPart += NLocal[ptype];
+
+    }
+
+    /* Allocate enough memory for stars and black holes.
+     * This will be dynamically increased as needed.*/
+
+    if(NumPart >= All.MaxPart) {
+        endrun(1, "Overwhelmed by part: %d > %d\n", NumPart, All.MaxPart);
+    }
+
+    int newSlots[6];
+
+    for(ptype = 0; ptype < 6; ptype++) {
+        /* initialize MaxSlots to zero, such that grow don't fail. */
+        newSlots[ptype] = 0;
+        if(NLocal[ptype] > 0) {
+            newSlots[ptype] = All.PartAllocFactor * NLocal[ptype];
+        }
+    }
+    /* additional allocation for new formation of particles; will grow automatically later; move this to grow? */
+    if(All.StarformationOn || NTotal[4] > 0) {
+        newSlots[4] +=  0.01 * All.MaxPart;
+    }
+    if(All.BlackHoleOn || NTotal[5] > 0) {
+        newSlots[5] +=  0.01 * All.MaxPart;
+    }
+
+    /* make sure identical numbers are for all ranks; move this to grow? */
+    MPI_Allreduce(MPI_IN_PLACE, newSlots, 6, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+
+    /* Now allocate memory for the secondary particle data arrays.
+     * This may be dynamically resized later!*/
+
+    slots_reserve(newSlots);
+
+    /* set up the memory topology */
+
+    int offset = 0;
+    for(ptype = 0; ptype < 6; ptype ++) {
+        /* set use this many slots; FIXME: encapuslate this */
+        SlotsManager->info[ptype].size = NLocal[ptype];
+
 #pragma omp parallel for
         for(i = 0; i < NLocal[ptype]; i++)
         {
@@ -237,42 +278,8 @@ void petaio_read_internal(char * fname, int ic) {
             P[j].Type = ptype;
             P[j].PI = i;
         }
+
         offset += NLocal[ptype];
-    }
-    N_sph_slots = NLocal[0];
-    N_star_slots = NLocal[4];
-    N_bh_slots = NLocal[5];
-
-    /* Allocate enough memory for stars and black holes.
-     * This will be dynamically increased as needed.*/
-    All.MaxPartSph = 0;
-    All.MaxPartStar = 0;
-    All.MaxPartBh = 0;
-    if(NumPart >= All.MaxPart) {
-        endrun(1, "Overwhelmed by part: %d > %d\n", NumPart, All.MaxPart);
-    }
-
-    if(N_sph_slots > 0) {
-        All.MaxPartSph = All.PartAllocFactor * N_sph_slots;
-    }
-    if(All.StarformationOn || N_star_slots > 0) {
-        All.MaxPartStar = All.PartAllocFactor * N_star_slots + 0.01 * All.MaxPart;
-    }
-    if(All.BlackHoleOn || N_bh_slots > 0) {
-        All.MaxPartBh = All.PartAllocFactor * N_bh_slots + 0.01 * All.MaxPart;
-    }
-    /* Now allocate memory for the secondary particle data arrays.
-     * This may be dynamically resized later!*/
-    if(All.MaxPartBh + All.MaxPartStar + All.MaxPartSph > 0) {
-        size_t bytes = All.MaxPartSph * sizeof(struct sph_particle_data) +
-            All.MaxPartStar * sizeof(struct star_particle_data) + All.MaxPartBh * sizeof(struct bh_particle_data);
-        void * secondary_data = mymalloc("SecondaryP", bytes);
-        /*Ordering: SPH, black holes, then stars*/
-        SphP = (struct sph_particle_data *) secondary_data;
-        BhP = (struct bh_particle_data *) (SphP + All.MaxPartSph);
-        StarP = (struct star_particle_data *) (BhP + All.MaxPartBh);
-        message(0, "Allocated %g MB for %d SPH, %d Stars and %d BHs.\n", bytes / (1024.0 * 1024.0),All.MaxPartSph,
-                All.MaxPartStar, All.MaxPartBh);
     }
 
     for(i = 0; i < IOTable.used; i ++) {
@@ -318,15 +325,7 @@ void petaio_read_internal(char * fname, int ic) {
 #pragma omp parallel for
     for(i = 0; i < NumPart; i++)
     {
-        if(P[i].Type == 5) {
-            BhP[P[i].PI].base.ID = P[i].ID;
-        }
-        if(P[i].Type == 0) {
-            SPHP(i).base.ID = P[i].ID;
-        }
-        if(P[i].Type == 4) {
-            STARP(i).base.ID = P[i].ID;
-        }
+        BASESLOT(i)->ID = P[i].ID;
     }
 }
 void
@@ -534,11 +533,7 @@ petaio_read_header_internal(BigFile * bf) {
     }
     /* sets the maximum number of particles that may reside on a processor */
     All.MaxPart = (int) (All.PartAllocFactor * All.TotNumPartInit / NTask);	
-    /* at most 10% of particles can form BH*/
-    All.MaxPartBh = (int) (0.1 * All.MaxPart);
-    /*Lyman alpha forms more stars*/
-    if(All.QuickLymanAlphaProbability > 0.5)
-        All.MaxPartBh = All.MaxPart;
+
 }
 
 void petaio_alloc_buffer(BigArray * array, IOTableEntry * ent, int64_t localsize) {
