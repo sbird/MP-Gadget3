@@ -481,6 +481,11 @@ density_ngbiter(
         const double u = r * iter->kernel.Hinv;
         const double wk = density_kernel_wk(&iter->kernel, u);
         O->Ngb += wk * iter->kernel_volume;
+        
+        /* For the BH only Ngb is used. BH density is
+         * computed during accretion.*/
+        if(I->Type == 5)
+            return;
 
         const double dwk = density_kernel_dwk(&iter->kernel, u);
 
@@ -489,8 +494,8 @@ density_ngbiter(
         O->Rho += (mass_j * wk);
 
         /* For the BH only density is used.*/
-        if(I->Type == 5)
-            return;
+//         if(I->Type == 5)
+//             return;
 
         /* Hinv is here because O->DhsmlDensity is drho / dH.
          * nothing to worry here */
